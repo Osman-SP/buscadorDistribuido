@@ -2,7 +2,6 @@ package com.search.controller;
 
 import com.search.model.IndexRequest;
 import com.search.service.InvertedIndex;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.ParameterizedTypeReference;
@@ -20,58 +19,56 @@ public class SearchController {
 
     private final InvertedIndex localIndex;
     private final RestClient restClient;
+    private String selfUrl;
 
-    @Value("${server.port}")
-    private int currentPort;
-
-    // Lista dinámica y thread-safe de todos los puertos activos en el clúster
-    private final Set<Integer> activeClusterPorts = new ConcurrentSkipListSet<>();
+    // Guarda las URLs completas (ej. "https://nodo1.onrender.com" o "http://localhost:5001")
+    private final Set<String> activeClusterUrls = new ConcurrentSkipListSet<>();
 
     public SearchController(InvertedIndex localIndex) {
         this.localIndex = localIndex;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(1500);
-        factory.setReadTimeout(1500);
+        factory.setConnectTimeout(5000); // 5s para tolerar latencia en la nube
+        factory.setReadTimeout(5000);
         this.restClient = RestClient.builder().requestFactory(factory).build();
     }
 
-    // Se ejecuta automáticamente en cuanto el servidor termina de encender
     @EventListener(ApplicationReadyEvent.class)
     public void registerWithExistingCluster() {
-        activeClusterPorts.add(currentPort);
+        this.selfUrl = System.getProperty("self.url", "http://localhost:5001").replaceAll("/$", "");
+        activeClusterUrls.add(this.selfUrl);
+
         String existingPeersProp = System.getProperty("initial.peers", "");
-        
         if (!existingPeersProp.isBlank()) {
-            for (String pStr : existingPeersProp.split(",")) {
-                int peerPort = Integer.parseInt(pStr);
-                activeClusterPorts.add(peerPort);
+            for (String peer : existingPeersProp.split(",")) {
+                String cleanPeer = peer.trim().replaceAll("/$", "");
+                if (cleanPeer.isEmpty() || cleanPeer.equals(this.selfUrl)) continue;
+
+                activeClusterUrls.add(cleanPeer);
                 try {
-                    // Le avisa al nodo existente que este nuevo servidor se acaba de unir
-                    List<Integer> peerKnownNodes = restClient.post()
-                            .uri("http://localhost:" + peerPort + "/api/peers/register?port=" + currentPort)
+                    Set<String> peerKnownNodes = restClient.post()
+                            .uri(cleanPeer + "/api/peers/register?url={url}", this.selfUrl)
                             .retrieve()
                             .body(new ParameterizedTypeReference<>() {});
                     if (peerKnownNodes != null) {
-                        activeClusterPorts.addAll(peerKnownNodes);
+                        activeClusterUrls.addAll(peerKnownNodes);
                     }
                 } catch (Exception ignored) {}
             }
         }
-        System.out.println("=== Nodo " + currentPort + " sincronizado. Clúster actual: " + activeClusterPorts + " ===");
+        System.out.println("=== Nodo activo en: " + selfUrl + " | Clúster: " + activeClusterUrls + " ===");
     }
 
-    // Endpoint para que nuevos servidores se anuncien y sincronicen la lista de nodos
     @PostMapping("/peers/register")
-    public Set<Integer> registerPeer(@RequestParam("port") int newPort) {
-        activeClusterPorts.add(newPort);
-        System.out.println("[+] Nuevo nodo detectado en el clúster: Puerto " + newPort + " | Total activos: " + activeClusterPorts);
-        return activeClusterPorts;
+    public Set<String> registerPeer(@RequestParam("url") String newUrl) {
+        String cleanUrl = newUrl.trim().replaceAll("/$", "");
+        activeClusterUrls.add(cleanUrl);
+        System.out.println("[+] Nuevo nodo registrado en el clúster: " + cleanUrl);
+        return activeClusterUrls;
     }
 
-    // Endpoint para que el cliente consulte todos los servidores disponibles
     @GetMapping("/peers")
-    public Set<Integer> getClusterPeers() {
-        return activeClusterPorts;
+    public Set<String> getClusterPeers() {
+        return activeClusterUrls;
     }
 
     @PostMapping("/index")
@@ -105,12 +102,12 @@ public class SearchController {
 
         List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-        for (int peerPort : activeClusterPorts) {
-            if (peerPort == currentPort) continue;
+        for (String peerUrl : activeClusterUrls) {
+            if (peerUrl.equals(this.selfUrl)) continue;
 
             CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                 try {
-                    String url = "http://localhost:" + peerPort + "/api/search/internal?q={query}";
+                    String url = peerUrl + "/api/search/internal?q={query}";
                     Map<String, Map<String, Integer>> peerResults = restClient.get()
                             .uri(url, query)
                             .retrieve()
@@ -120,8 +117,7 @@ public class SearchController {
                         mergeMaps(peerResults, consolidatedMap);
                     }
                 } catch (Exception e) {
-                    System.err.println("[!] Par inalcanzable en puerto " + peerPort + ". Removiendo de la lista activa.");
-                    activeClusterPorts.remove(peerPort); // Auto-limpieza si un nodo se apaga
+                    System.err.println("[!] Par inalcanzable: " + peerUrl);
                 }
             });
             futures.add(future);

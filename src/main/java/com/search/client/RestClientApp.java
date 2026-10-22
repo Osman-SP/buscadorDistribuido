@@ -12,25 +12,26 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class RestClientApp {
-    private static final int BASE_PORT = 5001;
-    private static final int MAX_SCAN_RANGE = 20;
+    // Cuando despliegues en Render, pega aquí la URL de tus nodos en Render:
+    // Ejemplo: Arrays.asList("https://nodo1.onrender.com", "https://nodo2.onrender.com")
+    private static final List<String> CLOUD_SEED_URLS = Arrays.asList(
+        // Pega aquí tus URLs de Render cuando las tengas
+    );
 
     private final RestClient restClient = RestClient.create();
-    // Lista thread-safe para que múltiples hilos consulten y actualicen los nodos vivos
-    private final List<Integer> knownServerPorts = new CopyOnWriteArrayList<>();
+    private final List<String> knownServerUrls = new CopyOnWriteArrayList<>();
     private final AtomicInteger roundRobinCounter = new AtomicInteger(0);
-    private int activeCoordinatorPort = -1;
 
     public void run() {
         if (!discoverCluster()) {
-            System.err.println("No se encontró ningún servidor activo (inicia al menos uno desde SearchServerApp).");
+            System.err.println("No se encontró ningún servidor activo.");
             return;
         }
 
         indexCorpusFilesDistributed();
 
         Scanner scanner = new Scanner(System.in);
-        System.out.println("\n=== Modo de Búsqueda Web (Clúster Distribuido) ===");
+        System.out.println("\n=== Modo de Búsqueda Web (Clúster en Nube / Local) ===");
         while (true) {
             System.out.print("\nIngrese término(s) a buscar (o 'salir'): ");
             String input = scanner.nextLine().trim();
@@ -40,7 +41,7 @@ public class RestClientApp {
 
             Map<String, Map<String, Integer>> results = searchWithFailover(input);
             if (results == null) {
-                System.err.println("Error crítico: Todos los servidores del clúster se han desconectado.");
+                System.err.println("Error crítico: Todos los servidores del clúster están inactivos.");
                 break;
             }
             displayResults(results);
@@ -48,120 +49,117 @@ public class RestClientApp {
         scanner.close();
     }
 
-    // Descubre todos los nodos activos en el clúster
     private synchronized boolean discoverCluster() {
-        if (knownServerPorts.isEmpty()) {
-            for (int p = BASE_PORT; p < BASE_PORT + MAX_SCAN_RANGE; p++) {
+        if (knownServerUrls.isEmpty()) {
+            // Si pusiste URLs de Render las usa; si no, escanea puertos locales 5001..5010
+            List<String> candidates = new ArrayList<>(CLOUD_SEED_URLS);
+            if (candidates.isEmpty()) {
+                for (int p = 5001; p <= 5010; p++) {
+                    candidates.add("http://localhost:" + p);
+                }
+            }
+
+            for (String candidateUrl : candidates) {
                 try {
-                    Set<Integer> clusterPeers = restClient.get()
-                            .uri("http://localhost:" + p + "/api/peers")
+                    Set<String> clusterPeers = restClient.get()
+                            .uri(candidateUrl + "/api/peers")
                             .retrieve()
                             .body(new ParameterizedTypeReference<>() {});
                     if (clusterPeers != null && !clusterPeers.isEmpty()) {
-                        knownServerPorts.addAll(clusterPeers);
-                        System.out.println("[i] Clúster descubierto con " + knownServerPorts.size() + " nodos: " + knownServerPorts);
+                        for (String peer : clusterPeers) {
+                            if (!knownServerUrls.contains(peer)) knownServerUrls.add(peer);
+                        }
+                        System.out.println("[i] Clúster descubierto (" + knownServerUrls.size() + " nodos): " + knownServerUrls);
                         break;
                     }
                 } catch (Exception ignored) {}
             }
         }
 
-        // Verifica y sincroniza con el primer nodo que responda
-        for (Integer port : new ArrayList<>(knownServerPorts)) {
+        for (String url : new ArrayList<>(knownServerUrls)) {
             try {
-                Set<Integer> updatedPeers = restClient.get()
-                        .uri("http://localhost:" + port + "/api/peers")
+                Set<String> updatedPeers = restClient.get()
+                        .uri(url + "/api/peers")
                         .retrieve()
                         .body(new ParameterizedTypeReference<>() {});
                 if (updatedPeers != null) {
-                    for (int up : updatedPeers) {
-                        if (!knownServerPorts.contains(up)) knownServerPorts.add(up);
+                    for (String up : updatedPeers) {
+                        if (!knownServerUrls.contains(up)) knownServerUrls.add(up);
                     }
                 }
-                activeCoordinatorPort = port;
                 return true;
             } catch (Exception e) {
-                System.out.println("[!] Servidor en puerto " + port + " inactivo. Descartando...");
-                knownServerPorts.remove(port);
+                System.out.println("[!] Servidor inactivo: " + url + ". Descartando...");
+                knownServerUrls.remove(url);
             }
         }
         return false;
     }
 
-    // Selecciona el siguiente servidor en turno (Round-Robin) para repartir la carga de RAM y CPU
-    private int getNextBalancedPort() {
-        if (knownServerPorts.isEmpty() && !discoverCluster()) {
-            return -1;
-        }
-        int index = Math.abs(roundRobinCounter.getAndIncrement() % knownServerPorts.size());
-        return knownServerPorts.get(index);
+    private String getNextBalancedUrl() {
+        if (knownServerUrls.isEmpty() && !discoverCluster()) return null;
+        int index = Math.abs(roundRobinCounter.getAndIncrement() % knownServerUrls.size());
+        return knownServerUrls.get(index);
     }
 
-    // Envía el documento al nodo asignado; si ese nodo falla, hace failover a otro nodo vivo
     private void sendIndexBalancedWithFailover(IndexRequest payload) {
-        while (!knownServerPorts.isEmpty() || discoverCluster()) {
-            int targetPort = getNextBalancedPort();
-            if (targetPort == -1) return;
+        while (!knownServerUrls.isEmpty() || discoverCluster()) {
+            String targetUrl = getNextBalancedUrl();
+            if (targetUrl == null) return;
 
             try {
                 restClient.post()
-                        .uri("http://localhost:" + targetPort + "/api/index")
+                        .uri(targetUrl + "/api/index")
                         .contentType(MediaType.APPLICATION_JSON)
                         .body(payload)
                         .retrieve()
                         .toBodilessEntity();
-                System.out.println("  -> [" + payload.docName() + "] indexado en el nodo :" + targetPort);
+                System.out.println("  -> [" + payload.docName() + "] indexado en " + targetUrl);
                 return;
             } catch (Exception e) {
-                System.err.println("[!] Fallo al indexar en puerto " + targetPort + ". Rebalanceando a otro servidor...");
-                knownServerPorts.remove(Integer.valueOf(targetPort));
+                System.err.println("[!] Fallo al indexar en " + targetUrl + ". Rebalanceando...");
+                knownServerUrls.remove(targetUrl);
             }
         }
     }
 
     private Map<String, Map<String, Integer>> searchWithFailover(String query) {
-        while (!knownServerPorts.isEmpty() || discoverCluster()) {
-            // También podemos rotar qué servidor actúa como coordinador en cada búsqueda
-            int coordinatorPort = getNextBalancedPort();
-            if (coordinatorPort == -1) return null;
+        while (!knownServerUrls.isEmpty() || discoverCluster()) {
+            String coordinatorUrl = getNextBalancedUrl();
+            if (coordinatorUrl == null) return null;
 
             try {
-                System.out.println("[i] Consultando a través del nodo coordinador :" + coordinatorPort);
+                System.out.println("[i] Consultando al nodo coordinador: " + coordinatorUrl);
                 return restClient.get()
-                        .uri("http://localhost:" + coordinatorPort + "/api/search?q={q}", query)
+                        .uri(coordinatorUrl + "/api/search?q={q}", query)
                         .retrieve()
                         .body(new ParameterizedTypeReference<>() {});
             } catch (Exception e) {
-                System.err.println("[!] Nodo coordinador " + coordinatorPort + " caído. Aplicando failover...");
-                knownServerPorts.remove(Integer.valueOf(coordinatorPort));
+                System.err.println("[!] Nodo coordinador caído (" + coordinatorUrl + "). Aplicando failover...");
+                knownServerUrls.remove(coordinatorUrl);
             }
         }
         return null;
     }
 
-    // Reparte e indexa los archivos en paralelo entre todos los servidores del clúster
     private void indexCorpusFilesDistributed() {
         File folder = new File("corpus");
         File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".txt"));
-        if (files == null || files.length == 0) {
-            System.out.println("[Aviso] No se encontraron archivos .txt en la carpeta 'corpus'.");
-            return;
-        }
+        if (files == null || files.length == 0) return;
 
-        System.out.println("Distribuido e indexando " + files.length + " archivos entre " + knownServerPorts.size() + " servidores...");
+        System.out.println("Distribuyendo e indexando " + files.length + " archivos en la nube...");
         long startTime = System.currentTimeMillis();
         List<Thread> workers = new ArrayList<>();
 
         for (File file : files) {
             Thread t = new Thread(() -> {
                 try {
-                    // Lee el archivo completo de una sola vez para hacer 1 petición HTTP por archivo
                     String content = Files.readString(file.toPath());
                     if (!content.isBlank()) {
                         sendIndexBalancedWithFailover(new IndexRequest(file.getName(), content));
                     }
                 } catch (IOException e) {
-                    System.err.println("Error leyendo " + file.getName() + ": " + e.getMessage());
+                    System.err.println("Error leyendo " + file.getName());
                 }
             });
             workers.add(t);
@@ -171,7 +169,7 @@ public class RestClientApp {
         for (Thread t : workers) {
             try { t.join(); } catch (InterruptedException ignored) {}
         }
-        System.out.println("Indexación distribuida completada en " + (System.currentTimeMillis() - startTime) + " ms.");
+        System.out.println("Indexación completada en " + (System.currentTimeMillis() - startTime) + " ms.");
     }
 
     private void displayResults(Map<String, Map<String, Integer>> results) {
