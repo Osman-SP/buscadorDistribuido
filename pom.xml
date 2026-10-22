@@ -14,13 +14,26 @@
 
     <properties>
         <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
     <dependencies>
-        <!-- Para crear los Servicios Web REST y usar JSON automáticamente -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
     </dependencies>
+
+    <!-- ESTE BLOQUE LE DICE A DOCKER Y RENDER QUÉ CLASE EJECUTAR AL ARRANCAR -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.search.SearchServerApp</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
