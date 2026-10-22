@@ -12,10 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class RestClientApp {
-    // Cuando despliegues en Render, pega aquí la URL de tus nodos en Render:
-    // Ejemplo: Arrays.asList("https://nodo1.onrender.com", "https://nodo2.onrender.com")
     private static final List<String> CLOUD_SEED_URLS = Arrays.asList(
-        // Pega aquí tus URLs de Render cuando las tengas
+        "https://buscador-nodo-1.onrender.com"
     );
 
     private final RestClient restClient = RestClient.create();
