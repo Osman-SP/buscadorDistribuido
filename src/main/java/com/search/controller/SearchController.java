@@ -155,7 +155,8 @@ public class SearchController {
     private void mergeMaps(Map<String, Map<String, Integer>> source, Map<String, Map<String, Integer>> target) {
         source.forEach((term, docMap) -> {
             Map<String, Integer> targetDocMap = target.computeIfAbsent(term, k -> new ConcurrentHashMap<>());
-            docMap.forEach((doc, count) -> targetDocMap.merge(doc, count, Integer::sum));
+            // Cambiado a Math::max para evitar duplicar conteos de réplicas
+            docMap.forEach((doc, count) -> targetDocMap.merge(doc, count, Math::max));
         });
     }
 }
