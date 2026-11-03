@@ -9,6 +9,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestClient;
+import java.io.File;
+import java.nio.file.Files;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -30,6 +32,27 @@ public class SearchController {
         factory.setConnectTimeout(5000); // 5s para tolerar latencia en la nube
         factory.setReadTimeout(5000);
         this.restClient = RestClient.builder().requestFactory(factory).build();
+    }
+    
+    private void autoIndexCorpus() {
+        File folder = new File("corpus");
+        File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".txt"));
+        if (files == null || files.length == 0) {
+            System.out.println("[-] No se encontraron archivos en la carpeta corpus.");
+            return;
+        }
+
+        for (File file : files) {
+            try {
+                String content = Files.readString(file.toPath());
+                for (String token : content.split("\\s+")) {
+                    localIndex.addTerm(token, file.getName());
+                }
+                System.out.println("[+] Auto-indexado documento local: " + file.getName());
+            } catch (Exception e) {
+                System.err.println("[!] Error leyendo " + file.getName());
+            }
+        }
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -56,6 +79,8 @@ public class SearchController {
             }
         }
         System.out.println("=== Nodo activo en: " + selfUrl + " | Clúster: " + activeClusterUrls + " ===");
+        
+        autoIndexCorpus();
     }
 
     @PostMapping("/peers/register")
