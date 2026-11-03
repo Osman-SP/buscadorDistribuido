@@ -9,5 +9,6 @@ RUN mvn clean package -DskipTests
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 COPY --from=build /app/target/distributed-search-ws-1.0.0.jar app.jar
+COPY corpus ./corpus
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
